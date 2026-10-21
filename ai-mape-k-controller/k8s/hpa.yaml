@@ -1,0 +1,52 @@
+# 原生 HPA：实验中 "hpa" 组的真实集群对应物（反应式基线）
+# 关键语义与 plan.py::HPAPlanner 一一对应：
+#   averageUtilization        -> HPAConfig.target_cpu_util
+#   scaleDown.stabilizationWindowSeconds -> HPAConfig.down_stabilization
+#   behavior.tolerance（控制器参数）     -> HPAConfig.tolerance
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: demo-app-hpa
+  namespace: default
+  labels:
+    app: demo-app
+    experiment: ai-mape-k
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: demo-app
+  minReplicas: 1
+  maxReplicas: 40
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60        # 与 HPAPlanner 默认目标一致
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "60"            # 单副本可持续吞吐，与 pod_capacity_rps 对齐
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0     # 扩容立即生效
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300   # 缩容稳定窗口 5min（保守防抖）
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+      selectPolicy: Min

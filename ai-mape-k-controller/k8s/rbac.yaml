@@ -1,0 +1,111 @@
+# AI-MAPE 控制器在真实集群中所需的权限：
+#   1) 读取 Deployment / Pod / HPA 与自定义指标（Analyze 环节的数据来源）
+#   2) 修改 Deployment 副本数（Execute 环节）
+# 最小权限原则：不使用 cluster-admin。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mape-controller
+  namespace: default
+  labels:
+    experiment: ai-mape-k
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mape-controller
+  labels:
+    experiment: ai-mape-k
+rules:
+  # --- 读取被管对象状态（Monitor） ---
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/status", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/status", "endpoints", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+
+  # --- 执行扩缩容（Execute）：仅放开 scale 子资源 ---
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch", "update"]
+
+  # --- 读取指标（Metrics Server / Prometheus Adapter） ---
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["custom.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+  - apiGroups: ["external.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+
+  # --- 记录控制决策事件（Knowledge / 可观测性） ---
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mape-controller
+  labels:
+    experiment: ai-mape-k
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mape-controller
+subjects:
+  - kind: ServiceAccount
+    name: mape-controller
+    namespace: default
+---
+# 可选：控制器自身部署（与本目录清单配套）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mape-controller
+  namespace: default
+  labels:
+    app: mape-controller
+    experiment: ai-mape-k
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mape-controller
+  template:
+    metadata:
+      labels:
+        app: mape-controller
+    spec:
+      serviceAccountName: mape-controller
+      containers:
+        - name: controller
+          image: registry.example.com/experiments/ai-mape-k-controller:1.0.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "main_exp.py"]
+          args:
+            - "--step-seconds=5"
+            - "--slo=300"
+            - "--pod-capacity=60"
+          env:
+            - name: TARGET_DEPLOYMENT
+              value: demo-app
+            - name: TARGET_NAMESPACE
+              value: default
+            - name: CONTROLLER_MODE
+              value: ai_mape          # static | hpa | noai_mape | ai_mape
+            - name: DRY_RUN
+              value: "true"           # 上线前先观察决策，不下发
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

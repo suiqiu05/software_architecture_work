@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+  namespace: default
+  labels:
+    app: demo-app
+    experiment: ai-mape-k
+spec:
+  # 由控制器接管副本数；静态组可用该值作为基线
+  replicas: 3
+  selector:
+    matchLabels:
+      app: demo-app
+  template:
+    metadata:
+      labels:
+        app: demo-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      # AI-MAPE 控制器使用独立 ServiceAccount（见 rbac.yaml）
+      serviceAccountName: mape-controller
+      containers:
+        - name: demo-app
+          image: registry.example.com/experiments/demo-app:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POD_CAPACITY_RPS
+              value: "60"          # 与 SystemConfig.pod_capacity_rps 对齐
+            - name: SERVICE_TIME_MS
+              value: "8"           # 与 SystemConfig.service_time_ms 对齐
+          # HPA 的 CPU 目标指标依赖 resources.requests，必须声明
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5      # 冷启动代价：对应 startup_steps
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]   # 优雅退出：对应 shutdown_steps
+      terminationGracePeriodSeconds: 30
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 50%
+      maxUnavailable: 0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app
+  namespace: default
+  labels:
+    app: demo-app
+spec:
+  type: ClusterIP
+  selector:
+    app: demo-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
