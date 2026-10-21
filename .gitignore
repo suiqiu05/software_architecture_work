@@ -1,0 +1,22 @@
+# Python 虚拟环境（由 setup_env 脚本生成，不入库）
+.venv/
+venv/
+env/
+
+# Python 字节码缓存
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 运行产物（仿真结果、图片、日志，可本地重新生成）
+results/
+*.log
+
+# 一键打包产物
+dist/
+
+# 编辑器 / 系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

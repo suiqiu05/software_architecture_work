@@ -1,0 +1,5 @@
+# Runtime dependencies for ai-mape-k-controller.
+# Everything else (simulation, HTTP console, LLM client) uses only the
+# Python standard library, so the package stays small and portable.
+numpy>=1.24
+matplotlib>=3.6
