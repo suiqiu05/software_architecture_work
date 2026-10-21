@@ -207,19 +207,26 @@ class AdaptivePlanner(BasePlanner):
     3. **在线自适应安全边际**：以滚动 SLO 违反率为反馈信号，乘性更新安全边际
        与目标利用率——违反上升即加冗余，长期安全则回收冗余以压低成本。
        另配非对称迟滞：扩容立即生效，缩容需连续满足 hold 周期，抑制抖动。
+    4. **总冗余封顶**：上述三个安全系数（预测上界 uplift、margin、1/target_util）
+       是串联相乘的，叠加后最多可达理论需求的 2.9 倍。max_overprovision 统一按
+       "当前观测需求 × 该倍数"封顶，防止复合放大造成纯浪费的过度扩容。
     """
 
     name = "adaptive"
 
     def __init__(self, margin_init: float = 1.05, margin_min: float = 0.95,
                  margin_max: float = 1.35, target_util_init: float = 0.92,
-                 target_util_min: float = 0.70, target_util_max: float = 0.97,
+                 target_util_min: float = 0.82, target_util_max: float = 0.97,
                  hold_steps: int = 4, gain: float = 1.05, decay: float = 0.985,
-                 sample_every: int = 15):
+                 sample_every: int = 15, max_overprovision: float = 2.0):
         self.margin = margin_init
         self.margin_min, self.margin_max = margin_min, margin_max
         self.target_util = target_util_init
         self.tu_min, self.tu_max = target_util_min, target_util_max
+        # 总冗余硬上限：所需副本不得超过"按当前观测算出的理论需求"的这个倍数。
+        # 它会截断 upper(uplift) × margin × 1/target_util 三个安全系数串联相乘
+        # 造成的复合放大，是防止过度预留的最后一道防线。
+        self.max_overprovision = max_overprovision
         self.hold_steps = hold_steps
         self.gain, self.decay = gain, decay
         self.sample_every = sample_every
@@ -251,8 +258,11 @@ class AdaptivePlanner(BasePlanner):
 
         if vr > 0.01:                       # 违反偏多：增加冗余
             if self.margin >= self.margin_max * 0.98 and self._is_stagnant():
-                # 冗余已封顶仍无改善：停止加码，缓慢回收以止损（避免无谓的资源浪费）
-                self.margin = max(self.margin_min, self.margin * (2.0 - self.decay))
+                # 冗余已封顶仍无改善：停止加码，缓慢回收以止损（避免无谓的资源浪费）。
+                # 注意：这里是"回收"，必须是 ×decay(0.985) 而非 ×(2−decay)；
+                # 且必须同样受 margin_max 钳制，否则该分支会绕过上限无限累加。
+                self.margin = max(self.margin_min,
+                                  min(self.margin_max, self.margin * self.decay))
                 self.target_util = min(self.tu_max, self.target_util * 1.01)
             else:
                 self.margin = min(self.margin_max, self.margin * self.gain)
@@ -284,6 +294,19 @@ class AdaptivePlanner(BasePlanner):
                                   max(config.pod_capacity_rps * 0.88, 1e-6)))
             if guard > needed:
                 needed, emergency = guard, True
+
+        # ---- 总冗余钳制 ----
+        uncapped = needed
+        capped = False
+        # upper(≤1.5×point) / margin(≤1.35) / 1÷target_util(≤1/0.82) 三者串联相乘，
+        # 极端情况下可达理论需求的 2.9 倍。实测 burst 段会扩到 35 副本（需求约 14），
+        # 属纯浪费。这里统一按"当前观测需求 × max_overprovision"封顶：
+        # 保留足够的前瞻余量（2 倍足以覆盖突发跃升），同时杜绝复合放大失控。
+        if self.max_overprovision and self.max_overprovision > 0:
+            theoretical = obs.observed_rps / max(config.pod_capacity_rps, 1e-6)
+            cap_n = int(math.ceil(theoretical * self.max_overprovision))
+            if needed > cap_n:
+                needed, capped = cap_n, True
 
         needed = int(max(config.min_replicas, min(config.max_replicas, needed)))
 
@@ -320,6 +343,8 @@ class AdaptivePlanner(BasePlanner):
                 "target_util": round(self.target_util, 4),
                 "sigma": round(forecast.sigma, 3),
                 "emergency": emergency,
+                "overprov_capped": capped,
+                "uncapped_needed": uncapped,
             },
         )
 
