@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI-MAPE-K 控制器实验控制台</title>
+<style>
+  :root{
+    --bg:#F5F7FA; --card:#FFFFFF; --border:#E3E8EF; --text:#1F2937;
+    --muted:#6B7280; --primary:#1565C0; --primary-soft:#E8F1FC;
+    --ok:#2E7D32; --warn:#B26A00; --err:#C62828; --chip:#F1F5F9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+  header{background:linear-gradient(90deg,#1565C0,#0D47A1);color:#fff;padding:18px 28px}
+  header h1{margin:0;font-size:19px;font-weight:600;letter-spacing:.3px}
+  header p{margin:4px 0 0;font-size:12.5px;opacity:.88}
+  main{max-width:1180px;margin:0 auto;padding:22px 20px 60px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;
+        padding:18px 20px;margin-bottom:18px;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+  .card h2{margin:0 0 4px;font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .card h2 .tag{font-size:11px;font-weight:500;color:var(--muted);background:var(--chip);
+                border-radius:4px;padding:2px 7px}
+  .hint{color:var(--muted);font-size:12.5px;margin:0 0 14px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px 16px}
+  .field{display:flex;flex-direction:column;gap:5px}
+  label{font-size:12.5px;color:#374151;font-weight:500}
+  input,select{height:34px;padding:0 9px;border:1px solid var(--border);border-radius:6px;
+               background:#fff;font-size:13px;color:var(--text);outline:none;width:100%}
+  input:focus,select:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-soft)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px}
+  button{height:34px;padding:0 16px;border-radius:6px;border:1px solid var(--primary);
+         background:var(--primary);color:#fff;font-size:13px;cursor:pointer;font-weight:500}
+  button.ghost{background:#fff;color:var(--primary)}
+  button.gray{border-color:var(--border);color:#374151;background:#fff}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  .badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:3px 10px;
+         border-radius:20px;background:var(--chip);color:var(--muted)}
+  .badge.ok{background:#E8F5E9;color:var(--ok)}
+  .badge.err{background:#FDECEA;color:var(--err)}
+  .badge.warn{background:#FFF6E5;color:var(--warn)}
+  .switch{display:flex;align-items:center;gap:7px;font-size:13px;color:#374151}
+  .switch input{width:auto;height:auto}
+  .secure{margin-top:12px;font-size:12px;color:var(--muted);background:#F8FAFC;
+          border-left:3px solid var(--primary);padding:9px 12px;border-radius:0 6px 6px 0}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px}
+  th,td{padding:8px 9px;text-align:right;border-bottom:1px solid var(--border);white-space:nowrap}
+  th:first-child,td:first-child{text-align:left}
+  thead th{background:#F8FAFC;color:#374151;font-weight:600}
+  tbody tr:hover{background:#FAFBFD}
+  .best{color:var(--ok);font-weight:600}
+  .imgs{display:grid;grid-template-columns:1fr;gap:14px;margin-top:10px}
+  .imgs img{width:100%;border:1px solid var(--border);border-radius:8px;background:#fff}
+  pre{background:#0F172A;color:#E2E8F0;padding:14px;border-radius:8px;font-size:12px;
+      overflow:auto;max-height:340px;margin:8px 0 0}
+  pre.light{background:#F8FAFC;color:#334155;border:1px solid var(--border)}
+  .links a{margin-right:14px;font-size:12.5px;color:var(--primary);text-decoration:none}
+  .links a:hover{text-decoration:underline}
+  .empty{color:var(--muted);font-size:13px;padding:10px 0}
+  footer{color:var(--muted);font-size:12px;text-align:center;padding:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>AI-MAPE-K 自适应控制器实验控制台</h1>
+  <p>在同一段回放流量上对比 Static / K8s HPA / NoAI-MAPE / AI-MAPE</p>
+</header>
+
+<main>
+  <!-- ① LLM 顾问 -->
+  <section class="card">
+    <h2>① 大模型顾问（可选）<span class="tag">LLM-as-Advisor</span></h2>
+    <p class="hint">
+      AI-MAPE 的控制环本身是<strong>本地在线学习算法</strong>，不联网、不需要 Key。
+      大模型只在两处低频环节介入：实验前推荐初始参数、实验后生成结论报告。
+      未配置时所有功能自动降级，不影响实验运行。
+    </p>
+    <div class="grid">
+      <div class="field">
+        <label>服务商预设</label>
+        <select id="provider"></select>
+      </div>
+      <div class="field">
+        <label>Base URL（OpenAI 兼容）</label>
+        <input id="base_url" placeholder="https://api.openai.com/v1">
+      </div>
+      <div class="field">
+        <label>模型</label>
+        <input id="model" placeholder="gpt-4o-mini">
+      </div>
+      <div class="field">
+        <label>API Key</label>
+        <input id="api_key" type="password" placeholder="sk-...（不会写入任何文件）" autocomplete="off">
+      </div>
+    </div>
+    <div class="row">
+      <button id="btn_save">保存并测试连接</button>
+      <button id="btn_clear" class="gray">清除</button>
+      <label class="switch"><input type="checkbox" id="remember">在本浏览器标签页记住（sessionStorage，关闭标签即失效）</label>
+      <span class="badge" id="key_status">未配置</span>
+    </div>
+    <div class="secure">
+      凭据处理：Key 通过 HTTPS 提交后仅驻留<strong>服务端进程内存</strong>（并同步到进程环境变量供并行子进程读取），
+      <strong>不写入源码、结果文件与日志</strong>；页面与接口返回一律脱敏显示（如 <code>sk-a****7f2</code>）。
+      也可改用环境变量 <code>AI_MAPE_LLM_API_KEY</code> 注入；命令行<strong>不提供</strong> --api-key 参数，以避免写入 shell 历史。
+    </div>
+  </section>
+
+  <!-- ② 实验参数 -->
+  <section class="card">
+    <h2>② 实验参数</h2>
+    <div class="grid">
+      <div class="field"><label>流量形态</label><select id="profile"></select></div>
+      <div class="field"><label>仿真周期数</label><input id="steps" type="number" value="720"></div>
+      <div class="field"><label>控制周期（秒）</label><input id="step_seconds" type="number" value="5" step="0.5"></div>
+      <div class="field"><label>随机种子（同种子+同参数 ⇒ 结果完全一致）</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input id="seed" type="number" value="42" style="flex:1">
+          <button type="button" id="btn_seed"
+                  style="padding:5px 10px;font-size:12px;cursor:pointer;border:1px solid #B5D4F4;background:#E6F1FB;color:#0C447C;border-radius:6px">随机</button>
+        </div>
+      </div>
+      <div class="field"><label>SLO p95（毫秒）</label><input id="slo" type="number" value="300"></div>
+      <div class="field"><label>单副本吞吐（rps）</label><input id="pod_capacity" type="number" value="60"></div>
+      <div class="field"><label>Static 组副本数（留空=按峰值估算）</label><input id="static_replicas" type="number" placeholder="自动"></div>
+      <div class="field"><label>并行进程数</label>
+        <select id="workers"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+      </div>
+    </div>
+    <div class="row">
+      <label class="switch"><input type="checkbox" id="use_llm">启用大模型顾问（需先配置 Key）</label>
+    </div>
+  </section>
+
+  <!-- ③ 运行与结果 -->
+  <section class="card">
+    <h2>③ 运行与结果</h2>
+    <div class="row">
+      <button id="btn_run">开始实验</button>
+      <button id="btn_retry" class="gray" style="display:none">重新连接</button>
+      <span class="badge" id="run_status">空闲</span>
+      <span class="links" id="downloads"></span>
+    </div>
+    <div id="run_meta" style="font-size:12px;color:#5F5E5A;margin:6px 0 0"></div>
+    <div id="api_notice" style="font-size:12px;color:#5F5E5A;margin:2px 0 0"></div>
+
+    <div id="summary_area" class="empty">尚未运行。点击「开始实验」后在此查看四组控制器的指标对比。</div>
+    <div class="imgs" id="imgs"></div>
+    <div id="report_area"></div>
+    <div id="log_area"></div>
+  </section>
+</main>
+<footer>AI-MAPE-K Controller Lab · 结果目录 results/web</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const SS_KEY = "ai_mape_llm_cfg";
+let POLL = null;
+let JOB_FAIL = 0;         // 连续"任务查询"失败次数
+let PING_FAIL = 0;        // 连续"连通性探测"失败次数
+let RUN_START = 0;        // 本次运行的起始时间戳（用于显示已运行秒数与超时判定）
+let CUR_JOB = null;       // 当前 job id
+const RUN_TIMEOUT_MS = 10 * 60 * 1000;   // 单次实验最长等待 10 分钟
+const MAX_JOB_FAIL = 8;                  // 服务可达时，容忍的任务查询失败次数
+const MAX_PING_FAIL = 6;                 // 连续探活失败达此值才判定"服务掉线"
+
+const METRICS = [
+  ["slo_violation_rate_pct","SLO违反率 %",2,"down"],
+  ["mean_p95_ms","p95均值 ms",1,"down"],
+  ["p95_of_p95_ms","p95的p95 ms",0,"down"],
+  ["mean_replicas","平均副本",2,"down"],
+  ["cost_per_1k_requests","成本/千请求",2,"down"],
+  ["scale_changes","调整次数",0,"down"],
+  ["rmse_h1","预测RMSE@h1",2,"down"],
+  ["mape_h1_pct","预测MAPE@h1 %",2,"down"],
+  ["composite_score","综合分",2,"down"],
+];
+
+/* 控制台基址：默认是同源（""）。
+   若页面被预览面板/静态服务器以副本形式在别的端口打开（如 :58234/static-html/...），
+   同源请求 /api/* 会全部 404 —— 此时自动探测真正的控制台端口并切换到绝对地址。
+   服务端已开放 CORS，跨域请求可正常工作。 */
+let API = "";
+function url(p){ return API ? API + p : p; }
+
+async function detectAPI(){
+  const cands = [];
+  if (location.protocol && location.protocol.startsWith("http")) cands.push(location.origin);
+  for (let p = 8765; p <= 8772; p++){
+    cands.push("http://127.0.0.1:" + p);
+    cands.push("http://localhost:" + p);
+  }
+  for (const b of cands){
+    try{
+      const r = await fetch(b + "/api/ping", {cache:"no-store"});
+      if (!r.ok) continue;
+      const j = await r.json();
+      if (j && j.ok){ API = (b === location.origin) ? "" : b; return b; }
+    }catch(e){ /* 该候选不可用，继续 */ }
+  }
+  return null;
+}
+
+async function api(path, body){
+  const opt = body ? {method:"POST", headers:{"Content-Type":"application/json"},
+                      body:JSON.stringify(body), cache:"no-store"} : {cache:"no-store"};
+  const r = await fetch(url(path), opt);
+  const txt = await r.text();
+  let data;
+  try{ data = JSON.parse(txt); }
+  catch(e){ throw new Error("响应不是 JSON（HTTP " + r.status + "）"); }
+  if (!r.ok) throw new Error(data && data.error ? data.error : ("HTTP " + r.status));
+  return data;
+}
+
+/* 轻量探活：与任务查询解耦，用来区分"服务掉线"和"单次请求抖动" */
+async function ping(){
+  const r = await fetch(url("/api/ping"), {cache:"no-store"});
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return await r.json();
+}
+
+/* 恢复对某个任务的轮询（首次提交 / 断线重连 / 刷新页面共用） */
+function startPolling(job_id){
+  if (POLL) clearInterval(POLL);
+  JOB_FAIL = 0; PING_FAIL = 0;
+  CUR_JOB = job_id;
+  $("btn_retry").style.display = "none";
+  POLL = setInterval(() => poll(job_id), 900);
+}
+
+function setBadge(el, text, cls){
+  el.textContent = text; el.className = "badge" + (cls ? " "+cls : "");
+}
+
+/* 诊断行：常显"页面来源 / 控制台地址 / 最近一次错误"，出问题看一眼就知道卡在哪 */
+function setDiag(extra){
+  const bits = [];
+  bits.push("页面 " + (location.origin || "file://"));
+  bits.push("控制台 " + (API || "同源"));
+  if (extra) bits.push(extra);
+  $("api_notice").textContent = bits.join(" · ");
+}
+
+function fmt(v, d){
+  if (v === null || v === undefined) return "-";
+  const n = Number(v);
+  if (!isFinite(n)) return "-";
+  return n.toFixed(d);
+}
+
+/* ---------- 初始化 ---------- */
+async function init(){
+  // 先探测控制台真实地址；若页面是经静态副本打开的，自动切换到控制台端口
+  const base = await detectAPI();
+  if (!base){
+    $("api_notice").innerHTML =
+      '<span style="color:#A32D2D">未能连通控制台</span>：请确认 <code>webui.bat</code> 窗口仍在运行，'
+      + '然后刷新本页；也可用命令行 <code>run.bat</code> 直接跑实验。';
+    return;
+  }
+  setDiag();
+
+  const cfg = await api("/api/config");
+  const prov = $("provider");
+  prov.innerHTML = '<option value="">自定义</option>' +
+    Object.keys(cfg.providers).map(k => `<option value="${k}">${k}</option>`).join("");
+  $("profile").innerHTML = ['composite', ...cfg.traffic_kinds]
+    .map(k => `<option value="${k}">${k}</option>`).join("");
+  $("base_url").value = cfg.llm.base_url || "";
+  $("model").value = cfg.llm.model || "";
+  if (cfg.llm.configured) setBadge($("key_status"), "已配置 " + cfg.llm.api_key_masked, "ok");
+
+  // 若上次勾选了“记住”，从 sessionStorage 回填（仅当前标签页）
+  const saved = sessionStorage.getItem(SS_KEY);
+  if (saved){
+    try{
+      const s = JSON.parse(saved);
+      $("base_url").value = s.base_url || $("base_url").value;
+      $("model").value = s.model || $("model").value;
+      $("api_key").value = s.api_key || "";
+      $("remember").checked = true;
+      await saveKey(false);   // 静默恢复，不弹连接测试
+      setBadge($("key_status"), "已从本标签页恢复 " + (s.masked || ""), "ok");
+    }catch(e){ /* 忽略损坏的会话数据 */ }
+  }
+
+  await resumeRunningJob();
+}
+
+async function resumeRunningJob(){
+  // 页面刷新/重开时，若服务端仍有任务在跑，自动接回轮询，
+  // 避免"任务其实已完成、界面却停在运行中"的状态漂移。
+  try{
+    const js = await api("/api/jobs");
+    const j = (js.jobs || []).find(
+      x => x.status === "running" || x.status === "queued");
+    if (!j) return;
+    CUR_JOB = j.id;
+    RUN_START = j.started_at ? j.started_at * 1000 : Date.now();
+    setRunning(true);
+    setBadge($("run_status"), "运行中…", "warn");
+    $("summary_area").className = "empty";
+    $("summary_area").textContent =
+      "已接回正在运行的任务（" + metaLine(j.params) + "）…";
+    startPolling(j.id);
+  }catch(e){ /* 兼容没有 /api/jobs 的旧后端 */ }
+}
+
+$("provider").addEventListener("change", async e => {
+  const name = e.target.value; if (!name) return;
+  const cfg = await api("/api/config");
+  const p = cfg.providers[name]; if (!p) return;
+  $("base_url").value = p.base_url; $("model").value = p.model;
+});
+
+async function saveKey(verbose){
+  const api_key = $("api_key").value.trim();
+  const base_url = $("base_url").value.trim();
+  const model = $("model").value.trim();
+  const remember = $("remember").checked;
+  const res = await api("/api/key", {api_key, base_url, model, remember});
+
+  if (remember && api_key){
+    sessionStorage.setItem(SS_KEY, JSON.stringify(
+      {base_url, model, api_key, masked: res.masked}));
+  } else {
+    sessionStorage.removeItem(SS_KEY);
+  }
+  if (verbose !== false){
+    if (!api_key){ setBadge($("key_status"), "已清除", "warn"); return; }
+    setBadge($("key_status"), "测试中…", "");
+    const t = await api("/api/key/test", {});
+    setBadge($("key_status"), t.ok ? "连接成功 · " + res.masked : "连接失败：" + t.message.slice(0,60),
+             t.ok ? "ok" : "err");
+  }
+}
+
+$("btn_save").addEventListener("click", () => saveKey(true));
+$("btn_clear").addEventListener("click", async () => {
+  $("api_key").value = ""; $("remember").checked = false;
+  sessionStorage.removeItem(SS_KEY);
+  await api("/api/key/clear", {});
+  setBadge($("key_status"), "未配置", "");
+});
+
+/* ---------- 运行 ---------- */
+$("btn_seed").addEventListener("click", () => {
+  $("seed").value = Math.floor(Math.random() * 99991);
+});
+
+function setRunning(on){
+  $("btn_run").disabled = on;
+  $("btn_run").textContent = on ? "运行中…" : "开始实验";
+}
+
+function resetRun(msg, cls){
+  if (POLL){ clearInterval(POLL); POLL = null; }
+  setRunning(false);
+  setBadge($("run_status"), msg, cls || "");
+  $("btn_retry").style.display = "none";
+}
+
+/* 断线后手动重连：不清空已有结果，直接接回原任务继续查状态 */
+$("btn_retry").addEventListener("click", async () => {
+  if (!CUR_JOB){
+    resetRun("无可重连任务", "err");
+    $("summary_area").textContent = "请先点击「开始实验」提交一次任务。";
+    return;
+  }
+  setRunning(true);
+  setBadge($("run_status"), "重连中…", "warn");
+  RUN_START = Date.now();          // 重新计时，避免旧时间戳触发超时
+  startPolling(CUR_JOB);
+});
+
+function metaLine(params, elapsed){
+  if (!params) return "";
+  const p = [
+    "形态 " + (params.profile || "-"),
+    "步数 " + (params.steps ?? "-"),
+    "种子 " + (params.seed ?? "-"),
+    "SLO " + (params.slo ?? "-") + " ms",
+    "并行 " + (params.workers ?? "-"),
+    "LLM " + (params.use_llm ? "开" : "关"),
+  ];
+  if (elapsed !== undefined && elapsed !== null) p.push("耗时 " + elapsed + " s");
+  return p.join(" · ");
+}
+
+$("btn_run").addEventListener("click", async () => {
+  if (POLL) return;                      // 已有任务在跑，忽略重复点击
+  setRunning(true);
+  setBadge($("run_status"), "提交中…", "warn");
+  $("run_meta").textContent = "";
+  $("summary_area").className = "empty";
+  $("summary_area").textContent = "正在回放流量并并行仿真四组控制器…";
+  $("imgs").innerHTML = ""; $("report_area").innerHTML = ""; $("log_area").innerHTML = "";
+  $("downloads").innerHTML = "";
+
+  const payload = {
+    profile: $("profile").value,
+    steps: +$("steps").value,
+    step_seconds: +$("step_seconds").value,
+    seed: +$("seed").value,
+    slo: +$("slo").value,
+    pod_capacity: +$("pod_capacity").value,
+    static_replicas: $("static_replicas").value ? +$("static_replicas").value : null,
+    workers: +$("workers").value,
+    use_llm: $("use_llm").checked,
+    llm_base_url: $("base_url").value.trim(),
+    llm_model: $("model").value.trim(),
+  };
+  try{
+    const r = await api("/api/run", payload);
+    if (!r || !r.job_id) throw new Error("服务端未返回 job_id");
+    RUN_START = Date.now();
+    setBadge($("run_status"), "运行中…", "warn");
+    startPolling(r.job_id);
+  }catch(e){
+    resetRun("提交失败", "err");
+    $("summary_area").textContent = "提交失败：" + (e && e.message ? e.message : e)
+      + "（请确认控制台仍在运行）";
+  }
+});
+
+async function poll(job_id){
+  // 超时兜底：外部依赖（如大模型接口）无响应时不至于永远转圈
+  if (Date.now() - RUN_START > RUN_TIMEOUT_MS){
+    resetRun("超时中止", "err");
+    $("summary_area").textContent =
+      "等待超过 10 分钟仍未返回。若勾选了「启用大模型顾问」，可能是接口无响应；"
+      + "可关闭该选项后重新运行。也可用命令行直接跑：run.bat";
+    return;
+  }
+
+  let job = null, lastErr = null;
+  try{
+    job = await api("/api/job?id=" + job_id);
+    JOB_FAIL = 0; PING_FAIL = 0;
+  }catch(e){
+    lastErr = e;
+    JOB_FAIL += 1;
+    const msg = (e && e.message) ? e.message : String(e);
+
+    // 备用通道：任务列表接口（路径不同、载荷更小）。只要它能确认任务还在，就不算断线。
+    let fallbackStatus = null;
+    try{
+      const js = await api("/api/jobs");
+      const hit = (js.jobs || []).find(x => x.id === job_id);
+      if (hit) fallbackStatus = hit.status;
+    }catch(e0){ /* 备用通道也不可用 */ }
+
+    if (fallbackStatus === "running" || fallbackStatus === "queued"){
+      JOB_FAIL = 0; PING_FAIL = 0;
+      const secs = Math.max(0, Math.round((Date.now() - RUN_START) / 1000));
+      setBadge($("run_status"),
+               (fallbackStatus === "queued" ? "排队中 " : "运行中 ") + secs + "s", "warn");
+      setDiag("任务查询暂不可用（" + msg + "），已改用任务列表接口");
+      return;
+    }
+    if (fallbackStatus){
+      // 任务确实存在（含已完成），只是 /api/job 这次没取到：继续重试，不判死
+      JOB_FAIL = Math.min(JOB_FAIL, 2);
+      setBadge($("run_status"), "取回结果中…", "warn");
+      setDiag("任务已存在（" + fallbackStatus + "），正在重取结果：" + msg);
+      return;
+    }
+
+    // 关键：先探活，区分"服务真掉线"与"单次请求抖动/瞬时不可达"
+    let alive = false;
+    try{ await ping(); alive = true; PING_FAIL = 0; }
+    catch(e2){ lastErr = e2; PING_FAIL += 1; }
+
+    if (alive){
+      // 服务还在，多半是瞬时抖动：继续轮询，不打断用户
+      setBadge($("run_status"), "重连中 " + JOB_FAIL + "/" + MAX_JOB_FAIL, "warn");
+      setDiag("任务查询失败：" + msg);
+      if (JOB_FAIL >= MAX_JOB_FAIL){
+        resetRun("记录丢失", "err");
+        $("summary_area").textContent =
+          "连续 " + MAX_JOB_FAIL + " 次查不到该任务，且任务列表里也没有它。"
+          + "服务可能被重启过，请重新点击「开始实验」。";
+        return;
+      }
+      return;
+    }
+
+    if (PING_FAIL >= MAX_PING_FAIL){
+      resetRun("连接中断", "err");
+      $("btn_retry").style.display = "";
+      const why = lastErr && lastErr.message ? lastErr.message : String(lastErr);
+      setDiag("探活失败：" + why);
+      $("summary_area").innerHTML =
+        "与服务端连接中断（连续 " + PING_FAIL + " 次探活失败）。<br>"
+        + "页面来源：<code>" + (location.origin || "file://") + "</code>，"
+        + "控制台：<code>" + (API || "同源") + "</code><br>"
+        + "原始错误：<code>" + why.replace(/</g,"&lt;") + "</code><br>"
+        + "排查：① 确认 <code>webui.bat</code> 窗口未关闭；② 点「重新连接」；"
+        + "③ 直接在新标签页打开 <code>http://127.0.0.1:8765</code>；"
+        + "④ 也可用 <code>run.bat</code> 命令行跑。";
+      return;
+    }
+    setBadge($("run_status"), "连接中断，重试 " + PING_FAIL + "/" + MAX_PING_FAIL, "warn");
+    setDiag("探活失败：" + ((lastErr && lastErr.message) ? lastErr.message : String(lastErr)));
+    return;
+  }
+
+  const status = job && job.status;
+  if (status === "running" || status === "queued"){
+    const secs = Math.max(0, Math.round((Date.now() - RUN_START) / 1000));
+    setBadge($("run_status"),
+             (status === "queued" ? "排队中 " : "运行中 ") + secs + "s", "warn");
+    return;
+  }
+
+  if (POLL){ clearInterval(POLL); POLL = null; }
+  setRunning(false);
+
+  if (status === "lost"){
+    setBadge($("run_status"), "记录丢失", "err");
+    $("summary_area").textContent =
+      job.error || "任务记录已不存在（服务可能被重启过），请重新运行。";
+    return;
+  }
+  if (status === "error"){
+    setBadge($("run_status"), "运行失败", "err");
+    $("summary_area").textContent = "错误：" + (job.error || "未知");
+    $("log_area").innerHTML = "<pre>" + (job.trace || "") + "</pre>";
+    return;
+  }
+  setBadge($("run_status"), "完成", "ok");
+  $("run_meta").textContent = metaLine(job.params, job.elapsed);
+  renderSummary(job);
+  renderImages(job);
+  renderReport(job);
+  renderLinks(job);
+  $("log_area").innerHTML = '<h2 style="font-size:13px;margin:14px 0 0">运行日志</h2><pre class="light">'
+    + (job.log || "").replace(/</g,"&lt;") + "</pre>";
+}
+
+function renderSummary(job){
+  const s = job.summary || {};
+  const keys = Object.keys(s);
+  if (!keys.length){ $("summary_area").textContent = "无结果"; return; }
+  // 每个指标的最优值（越低越好）
+  const best = {};
+  for (const [, key] of METRICS){
+    const vals = keys.map(k => Number(s[k][key])).filter(v => isFinite(v));
+    best[key] = vals.length ? Math.min(...vals) : null;
+  }
+  let html = "<table><thead><tr><th>控制器</th>" +
+    METRICS.map(m => `<th>${m[1]}</th>`).join("") + "</tr></thead><tbody>";
+  for (const k of keys){
+    html += `<tr><td>${k}</td>` + METRICS.map(m => {
+      const v = s[k][m[0]];
+      const isBest = best[m[0]] !== null && isFinite(Number(v)) &&
+                     Math.abs(Number(v) - best[m[0]]) < 1e-9;
+      return `<td class="${isBest ? "best" : ""}">${fmt(v, m[2])}</td>`;
+    }).join("") + "</tr>";
+  }
+  html += "</tbody></table>";
+  $("summary_area").className = "";
+  $("summary_area").innerHTML = html;
+}
+
+function renderImages(job){
+  const p = job.paths || {};
+  const t = Date.now();
+  let html = "";
+  if (p.comparison) html += `<img src="${url(p.comparison)}?t=${t}" alt="四组对比">`;
+  if (p.forecast_error) html += `<img src="${url(p.forecast_error)}?t=${t}" alt="预测误差">`;
+  $("imgs").innerHTML = html;
+}
+
+function renderReport(job){
+  if (!job.report){ $("report_area").innerHTML = ""; return; }
+  $("report_area").innerHTML =
+    '<h2 style="font-size:13px;margin:16px 0 0">大模型结论报告</h2><pre>' +
+    job.report.replace(/</g,"&lt;") + "</pre>";
+}
+
+function renderLinks(job){
+  const p = job.paths || {};
+  const items = [
+    ["指标 CSV", p.summary_csv], ["完整 JSON", p.summary_json],
+    ["回放流量", p.traffic], ["LLM 报告", p.report],
+  ].filter(x => x[1]);
+  $("downloads").innerHTML = items
+    .map(([n, u]) => `<a href="${url(u)}" target="_blank">${n} ↓</a>`).join("");
+}
+
+init();
+</script>
+</body>
+</html>
