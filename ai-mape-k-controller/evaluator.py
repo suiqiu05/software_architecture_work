@@ -47,11 +47,27 @@ class ControllerRun:
 
 
 class Evaluator:
-    """四组控制器的统一指标采集与汇总。"""
+    """四组控制器的统一指标采集与汇总。
 
-    def __init__(self, config: SystemConfig = DEFAULT_CONFIG):
+    综合评分的口径（0-100，**越高越好**）：
+        quality_score    = 100 * clip(1 - 违反率 / slo_budget_pct, 0, 1)
+                           违反率 0% 得满分，达到预算即 0 分；
+        efficiency_score = 100 * 最低成本 / 该组成本        （相对效率，最低成本组满分）
+        composite_score  = w_quality * quality + w_cost * efficiency
+
+    之所以不用 "违反率 + 系数×成本" 的裸加和：两项量纲不同（% 与 成本/千请求），
+    成本项的绝对大小取决于 pod_cost_per_step 的标定值，换一个成本常数排序就会变，
+    既不可解释也无法跨实验比较。归一化后两项都落在 0-100，权重才有实际含义。
+    """
+
+    def __init__(self, config: SystemConfig = DEFAULT_CONFIG,
+                 slo_budget_pct: float = 5.0,
+                 w_quality: float = 0.7, w_cost: float = 0.3):
         self.cfg = config
         self.runs: Dict[str, ControllerRun] = {}
+        self.slo_budget_pct = float(slo_budget_pct)
+        self.w_quality = float(w_quality)
+        self.w_cost = float(w_cost)
 
     # ---------------- 采集 ----------------
     def begin_run(self, key: str, label: str, meta: Optional[Dict[str, object]] = None) -> None:
@@ -165,14 +181,49 @@ class Evaluator:
 
     def summary(self) -> Dict[str, Dict[str, float]]:
         out = {k: self._summarize(r) for k, r in self.runs.items()}
-        # 跨组归一化：以最低成本组为基准计算相对成本与综合分
+        if not out:
+            return out
+
+        # ---- 跨组归一化：以最低成本组为基准 ----
         valid_costs = [v["cost_per_1k_requests"] for v in out.values()
-                       if not math.isnan(v.get("cost_per_1k_requests", float("nan")))]
+                       if math.isfinite(v.get("cost_per_1k_requests", float("nan")))]
         base_cost = min(valid_costs) if valid_costs else 1.0
+        budget = max(self.slo_budget_pct, 1e-6)
+
         for v in out.values():
-            v["cost_index"] = v["cost_per_1k_requests"] / max(base_cost, 1e-6)
-            # 综合分（越低越好）：违反率为主，成本为次
-            v["composite_score"] = v["slo_violation_rate_pct"] + 0.5 * v["cost_per_1k_requests"]
+            cost = v["cost_per_1k_requests"]
+            viol = v["slo_violation_rate_pct"]
+
+            # 相对最低成本组的倍数（1.0 = 最省，>1 = 更贵）
+            v["cost_index"] = cost / max(base_cost, 1e-6)
+            # 效率分：最低成本组 100 分，成本翻倍即 50 分
+            v["efficiency_score"] = 100.0 * base_cost / max(cost, 1e-9)
+            # 质量分：违反率 0% 满分，达到 SLO 预算即 0 分
+            v["quality_score"] = 100.0 * max(0.0, min(1.0, 1.0 - viol / budget))
+            # 是否落在 SLO 预算内（1 = 达标）
+            v["slo_compliant"] = 1.0 if viol <= budget else 0.0
+            # 综合得分（越高越好）
+            v["composite_score"] = (self.w_quality * v["quality_score"]
+                                    + self.w_cost * v["efficiency_score"])
+
+        # ---- 帕累托前沿：质量（违反率越低越好）× 成本（越低越好）----
+        keys = list(out)
+        for k in keys:
+            v = out[k]["slo_violation_rate_pct"]
+            c = out[k]["cost_per_1k_requests"]
+            dominated = any(
+                out[j]["slo_violation_rate_pct"] <= v + 1e-12
+                and out[j]["cost_per_1k_requests"] <= c + 1e-12
+                and (out[j]["slo_violation_rate_pct"] < v - 1e-12
+                     or out[j]["cost_per_1k_requests"] < c - 1e-12)
+                for j in keys if j != k
+            )
+            out[k]["pareto_optimal"] = 0.0 if dominated else 1.0
+
+        # ---- 综合得分排名（1 = 最优）----
+        for rank, k in enumerate(sorted(keys, key=lambda x: -out[x]["composite_score"]), 1):
+            out[k]["rank"] = float(rank)
+
         return out
 
     # ---------------- 输出 ----------------
@@ -191,11 +242,10 @@ class Evaluator:
         if not rows:
             print("(无评估结果)")
             return
-        cols = ["controller", "slo_violation_rate_pct", "mean_p95_ms", "p95_of_p95_ms",
-                "mean_replicas", "total_cost", "cost_per_1k_requests",
-                "scale_changes", "flapping_per_min",
-                "forecast_horizon", "forecast_rmse", "forecast_mape_pct",
-                "rmse_h1", "mape_h1_pct", "composite_score"]
+        cols = ["controller", "slo_violation_rate_pct", "mean_p95_ms",
+                "mean_replicas", "cost_per_1k_requests", "scale_changes",
+                "rmse_h1", "mape_h1_pct",
+                "quality_score", "efficiency_score", "composite_score", "rank"]
         widths = {c: max(len(c), *(len(f"{r.get(c, '')}") for r in rows)) for c in cols}
         line = "  ".join(c.ljust(widths[c]) for c in cols)
         print("\n" + "=" * len(line))
@@ -203,7 +253,11 @@ class Evaluator:
         print("-" * len(line))
         for r in rows:
             print("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols))
-        print("=" * len(line) + "\n")
+        print("=" * len(line))
+        print(f"  quality = 100*(1 - 违反率/{self.slo_budget_pct:.1f}%), "
+              f"efficiency = 100*(最低成本/该组成本), "
+              f"composite = {self.w_quality:.2f}*quality + {self.w_cost:.2f}*efficiency "
+              f"（0-100，越高越好；rank 1 = 综合最优）\n")
 
     def to_csv(self, path: str) -> str:
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)

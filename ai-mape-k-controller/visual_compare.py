@@ -79,13 +79,21 @@ def plot_comparison(evaluator: Evaluator, scenario_values: Optional[Sequence[flo
     if scenario is not None and scenario_values is None:
         scenario_values = getattr(scenario, "values", None)
 
-    fig, axes = plt.subplots(5, 1, figsize=(15, 17), sharex=True,
-                             gridspec_kw={"height_ratios": [1.0, 1.25, 1.1, 1.0, 1.35]})
+    # 不用 sharex：最后一张残差图按"预测样本序号"排列，与前面按分钟的时间轴量纲不同。
+    # 若共享，bar 的 autoscale 会把 0..n_steps 的样本序号反灌给所有子图，把 60 分钟的
+    # 曲线压成最左边一条 —— 因此改为各自独立 + 手动锁定前 5 张的时间范围。
+    fig, axes = plt.subplots(6, 1, figsize=(15, 19), sharex=False,
+                             gridspec_kw={"height_ratios": [1.0, 1.25, 1.1, 1.0, 1.25, 0.85]})
     fig.suptitle(title, fontsize=15, fontweight="bold", y=0.985)
 
     n_steps = max((r.n_steps for r in runs.values()), default=0)
     t = np.arange(n_steps)
     t_min = t * (cfg.step_seconds / 60.0) if cfg else t
+    duration_min = float(n_steps) * (cfg.step_seconds / 60.0) if cfg else float(n_steps)
+    for i, a in enumerate(axes[:5]):
+        a.set_xlim(0, duration_min)
+        if i < 4:
+            a.tick_params(labelbottom=False)
 
     # ---------- (a) 流量 ----------
     ax = axes[0]
@@ -121,6 +129,17 @@ def plot_comparison(evaluator: Evaluator, scenario_values: Optional[Sequence[flo
     ax.axhline(cfg.slo_latency_ms, color="#B00020", linestyle="--", linewidth=1.2,
                label=f"SLO p95 = {cfg.slo_latency_ms:.0f} ms")
     ax.set_yscale("log")
+    # 排队时延在副本不足时会指数爆炸（可达 10^4 ms），不裁剪会把 10-300ms 的主区间
+    # 压成底部一条线，四组差异完全看不出来。这里按分位数裁剪并显式标注。
+    lat_all = np.concatenate([_trace(runs[k], "p95_latency_ms") for k in keys]) if keys else np.array([])
+    if lat_all.size:
+        lo = max(1.0, float(np.nanpercentile(lat_all, 1)) * 0.5)
+        hi = max(float(np.nanpercentile(lat_all, 99.5)) * 2.0, cfg.slo_latency_ms * 3.0)
+        ax.set_ylim(lo, hi)
+        n_clip = int(np.sum(lat_all > hi))
+        note = f"y axis clipped at {hi:.0f} ms" + (f" ({n_clip} spikes above)" if n_clip else "")
+        ax.text(0.995, 0.94, note, transform=ax.transAxes, ha="right", va="top",
+                fontsize=7, color="#888888", style="italic")
     _style_axes(ax, "(b) p95 Latency (log scale) vs SLO", "p95 latency (ms)")
     ax.legend(fontsize=8, ncol=5, loc="upper left")
 
@@ -159,25 +178,31 @@ def plot_comparison(evaluator: Evaluator, scenario_values: Optional[Sequence[flo
     ax.legend(fontsize=8, ncol=4, loc="upper left")
     if scenario_values is not None:
         # 截断 y 轴：NoAI 的趋势外推在突发上升沿会给出极端高估，保留可读性
-        ax.set_ylim(0, float(np.max(np.asarray(scenario_values, dtype=float))) * 1.30)
+        v_max = float(np.max(np.asarray(scenario_values, dtype=float)))
+        ax.set_ylim(0, v_max * 1.30)
+        ax.text(0.995, 0.94, f"y axis clipped at {v_max * 1.30:.0f} rps",
+                transform=ax.transAxes, ha="right", va="top",
+                fontsize=7, color="#888888", style="italic")
 
-    # 残差柱状图（右下角 inset）
-    try:
-        ins = ax.inset_axes([0.62, 0.12, 0.36, 0.34])
-        for k in keys:
-            pairs = runs[k].forecast_pairs
-            if not pairs:
-                continue
-            res = np.asarray([a - p for a, p in pairs], dtype=float)
-            ins.bar(np.arange(len(res)), res, width=1.0, alpha=0.65,
-                    color=COLORS.get(k), label=LABELS.get(k, k))
-        ins.axhline(0.0, color="#333333", linewidth=0.8)
-        ins.set_title("residual (actual - predicted)", fontsize=8)
-        ins.tick_params(labelsize=6)
-        ins.grid(True, alpha=0.2, linestyle="--", linewidth=0.5)
-        ins.legend(fontsize=6, ncol=2)
-    except Exception:  # inset 失败不影响主图
-        pass
+    # ---------- (f) 预测残差（独立子图，不再用 inset 遮挡主曲线）----------
+    ax = axes[5]
+    has_residual = False
+    for k in keys:
+        pairs = runs[k].forecast_pairs
+        if not pairs:
+            continue
+        res = np.asarray([a - p for a, p in pairs], dtype=float)
+        ax.bar(np.arange(len(res)), res, width=1.0, alpha=0.7,
+               color=COLORS.get(k), label=LABELS.get(k, k))
+        has_residual = True
+    ax.axhline(0.0, color="#333333", linewidth=0.8)
+    if not has_residual:
+        ax.text(0.5, 0.5, "no forecasting controller in this run",
+                transform=ax.transAxes, ha="center", va="center",
+                fontsize=9, color="#888888")
+    _style_axes(ax, "(f) Forecast Residual (actual - predicted, decision horizon)",
+                "residual (rps)", "forecast sample index")
+    ax.legend(fontsize=8, ncol=2, loc="upper right")
 
     fig.tight_layout(rect=(0, 0, 1, 0.975))
     path = os.path.join(outdir, filename)
@@ -193,38 +218,64 @@ def plot_forecast_errors(evaluator: Evaluator, outdir: str = DEFAULT_OUTDIR,
                          filename: str = "forecast_error.png") -> str:
     os.makedirs(outdir, exist_ok=True)
     runs = evaluator.runs
-    keys = [k for k in ORDER if k in runs] or list(runs.keys())
+    all_keys = [k for k in ORDER if k in runs] or list(runs.keys())
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.6))
-    fig.suptitle("Forecast Accuracy: NoAI-MAPE vs AI-MAPE",
+    # 只画**真正具备预测能力**的控制器：把 Static / HPA 按 0 画进柱状图，会让人
+    # 误读成"误差为 0、预测最准"，而它们根本没有预测输出（NaN）。
+    keys = [k for k in all_keys if (runs[k].forecast_pairs_h1 or runs[k].forecast_pairs)]
+    skipped = [k for k in all_keys if k not in keys]
+
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4.8))
+    fig.suptitle("Forecast Accuracy: NoAI-MAPE vs AI-MAPE (h=1, same horizon)",
                  fontsize=13, fontweight="bold", y=1.0)
 
-    # ---- RMSE / MAPE 柱状图（统一 h=1 视界，跨控制器公平） ----
-    ax = axes[0]
-    metric_keys = ["rmse", "mape"]
-    x = np.arange(len(metric_keys))
-    width = 0.8 / max(len(keys), 1)
-    for i, k in enumerate(keys):
-        errs = runs[k].forecast_errors_h1 or runs[k].forecast_errors or {}
-        vals = []
-        for m in metric_keys:
-            v = errs.get(m, float("nan"))
-            vals.append(0.0 if v != v else v)  # NaN -> 0
-        ax.bar(x + i * width, vals, width=width, color=COLORS.get(k),
-               label=LABELS.get(k, k), alpha=0.9)
-    ax.set_xticks(x + width * (len(keys) - 1) / 2)
-    ax.set_xticklabels(["RMSE (rps)", "MAPE (%)"], fontsize=9)
-    ax.set_title("(a) Error metrics @ h=1, same horizon (lower is better)",
-                 fontsize=11, fontweight="bold")
-    ax.grid(True, axis="y", alpha=0.28, linestyle="--", linewidth=0.7)
-    ax.legend(fontsize=8)
-    ax.set_xlabel("Static / HPA have no forecasting capability "
-                  "(plotted as 0)", fontsize=7, color="#666666", style="italic")
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
+    if not keys:
+        for ax in axes:
+            ax.axis("off")
+        fig.text(0.5, 0.5, "no forecasting controller in this run",
+                 ha="center", va="center", fontsize=11, color="#888888")
+        fig.tight_layout()
+        path = os.path.join(outdir, filename)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return path
+
+    # ---- (a) RMSE / (b) MAPE：量纲不同（rps vs %），必须分轴，
+    #      否则 RMSE≈60 会把 MAPE≈10 的柱子压成看不见的一条 ----
+    for ax, metric, ylabel, title in (
+        (axes[0], "rmse", "RMSE (rps)", "(a) RMSE @ h=1 (lower is better)"),
+        (axes[1], "mape", "MAPE (%)", "(b) MAPE @ h=1 (lower is better)"),
+    ):
+        vals, labels, colors = [], [], []
+        for k in keys:
+            errs = runs[k].forecast_errors_h1 or runs[k].forecast_errors or {}
+            v = float(errs.get(metric, float("nan")))
+            if not np.isfinite(v):
+                continue
+            vals.append(v)
+            labels.append(LABELS.get(k, k))
+            colors.append(COLORS.get(k))
+        pos = np.arange(len(vals))
+        ax.bar(pos, vals, width=0.55, color=colors, alpha=0.9)
+        for p, v in zip(pos, vals):
+            ax.text(p, v, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+        ax.set_xticks(pos)
+        ax.set_xticklabels(labels, fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.grid(True, axis="y", alpha=0.28, linestyle="--", linewidth=0.7)
+        ax.tick_params(labelsize=8)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+
+    if skipped:
+        fig.text(0.5, 0.015,
+                 "not plotted (no forecasting capability): "
+                 + ", ".join(LABELS.get(k, k) for k in skipped),
+                 ha="center", va="bottom", fontsize=8, color="#888888", style="italic")
 
     # ---- 残差分布 ----
-    ax = axes[1]
+    ax = axes[2]
     data, labels, colors = [], [], []
     for k in keys:
         pairs = runs[k].forecast_pairs_h1 or runs[k].forecast_pairs
@@ -245,7 +296,7 @@ def plot_forecast_errors(evaluator: Evaluator, outdir: str = DEFAULT_OUTDIR,
             patch.set_facecolor(c)
             patch.set_alpha(0.55)
     ax.axhline(0.0, color="#333333", linewidth=0.9)
-    ax.set_title("(b) Residual distribution", fontsize=11, fontweight="bold")
+    ax.set_title("(c) Residual distribution", fontsize=11, fontweight="bold")
     ax.set_ylabel("actual - predicted (rps)", fontsize=9)
     ax.grid(True, axis="y", alpha=0.28, linestyle="--", linewidth=0.7)
     ax.tick_params(labelsize=8)
@@ -253,7 +304,7 @@ def plot_forecast_errors(evaluator: Evaluator, outdir: str = DEFAULT_OUTDIR,
         ax.spines[side].set_visible(False)
 
     # ---- 残差绝对值时序（滚动均值） ----
-    ax = axes[2]
+    ax = axes[3]
     for k in keys:
         pairs = runs[k].forecast_pairs_h1 or runs[k].forecast_pairs
         if not pairs:
@@ -264,7 +315,7 @@ def plot_forecast_errors(evaluator: Evaluator, outdir: str = DEFAULT_OUTDIR,
         smooth = np.convolve(res, kernel, mode="valid")
         ax.plot(np.arange(len(smooth)), smooth, color=COLORS.get(k),
                 linewidth=1.2, label=LABELS.get(k, k), alpha=0.95)
-    ax.set_title("(c) |residual| rolling mean over time", fontsize=11, fontweight="bold")
+    ax.set_title("(d) |residual| rolling mean over time", fontsize=11, fontweight="bold")
     ax.set_ylabel("|actual - predicted| (rps)", fontsize=9)
     ax.set_xlabel("forecast sample index", fontsize=9)
     ax.grid(True, alpha=0.28, linestyle="--", linewidth=0.7)

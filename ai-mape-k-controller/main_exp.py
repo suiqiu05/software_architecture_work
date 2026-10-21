@@ -143,6 +143,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                    help="Static 组副本数；默认按流量峰值×1.15/单副本容量估算")
     p.add_argument("--slo", type=float, default=300.0, help="p95 时延 SLO（毫秒）")
     p.add_argument("--pod-capacity", type=float, default=60.0, help="单副本可持续吞吐（req/s）")
+    # ---- 综合评分口径（0-100，越高越好）----
+    p.add_argument("--slo-budget", type=float, default=5.0,
+                   help="SLO 违反率预算（%%）：0%% 得满分，达到该值质量分归零")
+    p.add_argument("--w-quality", type=float, default=0.7,
+                   help="综合得分中质量分（SLO 达标度）的权重")
+    p.add_argument("--w-cost", type=float, default=0.3,
+                   help="综合得分中效率分（相对成本）的权重")
     p.add_argument("--no-plot", action="store_true", help="跳过绘图")
     p.add_argument("--quiet", action="store_true", help="减少控制台输出")
     # 注意：此处**故意不提供** --api-key 参数——命令行参数会进入 shell history
@@ -256,7 +263,8 @@ def run_experiment(args: argparse.Namespace) -> Dict[str, object]:
                 results[k] = fut.result()
 
     # ---------------- 5. 汇总评估 ----------------
-    ev = Evaluator(cfg)
+    ev = Evaluator(cfg, slo_budget_pct=args.slo_budget,
+                   w_quality=args.w_quality, w_cost=args.w_cost)
     for k in keys:
         r = results[k]
         ev.begin_run(k, str(r["label"]), meta=dict(r["meta"]))  # type: ignore[arg-type]
@@ -316,14 +324,16 @@ def run_experiment(args: argparse.Namespace) -> Dict[str, object]:
                 print(f"    - traces   : {len(traces)} files under {args.outdir}")
             else:
                 print(f"    - {name:<12s}: {p}")
-        _print_conclusion(summary)
+        _print_conclusion(summary, args.slo_budget, args.w_quality, args.w_cost)
 
     return {"evaluator": ev, "summary": summary, "paths": paths,
             "scenario": scenario, "config": cfg}
 
 
-def _print_conclusion(summary: Dict[str, Dict[str, float]]) -> None:
-    """自动生成结论摘要：AI-MAPE 相对各组基线的改进幅度。"""
+def _print_conclusion(summary: Dict[str, Dict[str, float]],
+                      slo_budget_pct: float = 5.0,
+                      w_quality: float = 0.7, w_cost: float = 0.3) -> None:
+    """自动生成结论摘要：AI-MAPE 相对各组基线的改进幅度 + 综合排名。"""
     if "ai_mape" not in summary:
         return
     ai = summary["ai_mape"]
@@ -351,6 +361,33 @@ def _print_conclusion(summary: Dict[str, Dict[str, float]]) -> None:
         if n_rmse == n_rmse and ai_rmse == ai_rmse and n_rmse > 1e-9:
             print(f"    -> same-horizon RMSE reduction: "
                   f"{(n_rmse - ai_rmse) / n_rmse * 100:.1f}%")
+
+    # ---- 综合得分（0-100，越高越好）：质量 + 效率的显式加权 ----
+    print(f"\n  composite    :  (0-100, higher is better; "
+          f"quality {w_quality:.2f} / efficiency {w_cost:.2f}, "
+          f"SLO budget {slo_budget_pct:.1f}%)")
+    order = sorted(summary, key=lambda k: -summary[k].get("composite_score", float("-inf")))
+    for k in order:
+        m = summary[k]
+        mark = " [pareto]" if m.get("pareto_optimal", 0) >= 0.5 else ""
+        print(f"    #{int(m.get('rank', 0))} {k:<10s} score {m['composite_score']:6.2f}  "
+              f"(quality {m['quality_score']:5.1f} / efficiency {m['efficiency_score']:5.1f}, "
+              f"cost {m['cost_per_1k_requests']:6.2f}{mark})")
+
+    pareto = [k for k in order if summary[k].get("pareto_optimal", 0) >= 0.5]
+    ok = [k for k in order if summary[k].get("slo_compliant", 0) >= 0.5]
+    if len(pareto) == len(order):
+        print(f"    pareto front : all {len(order)} controllers are mutually non-dominated "
+              f"(i.e. they trace a quality-cost trade-off curve)")
+    else:
+        dominated = [k for k in order if k not in pareto]
+        print(f"    pareto front : {', '.join(pareto)}   | dominated: {', '.join(dominated)}")
+    print(f"    budget-pass  : {', '.join(ok) if ok else '(none)'}"
+          f"  —— SLO 预算 {slo_budget_pct:.1f}% 内共 {len(ok)}/{len(order)} 组达标")
+    if ok:
+        cheapest = min(ok, key=lambda k: summary[k]["cost_per_1k_requests"])
+        print(f"    best-in-budget: {cheapest} "
+              f"(达标组中成本最低 = {summary[cheapest]['cost_per_1k_requests']:.2f} / 1k req)")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

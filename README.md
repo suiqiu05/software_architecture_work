@@ -71,22 +71,41 @@ python main_exp.py --traffic-csv my.csv         # 回放真实流量
 ```
 
 常用参数：`--profile`(steady/diurnal/burst/random_walk/staircase/ramp/oscillation/spike/composite)、
-`--steps`、`--seed`、`--slo`、`--pod-capacity`、`--workers`、`--outdir`、`--no-plot`、`--llm`。
+`--steps`、`--seed`、`--slo`、`--pod-capacity`、`--workers`、`--outdir`、`--no-plot`、`--llm`；
+评分口径：`--slo-budget`（违反率预算，默认 5%）、`--w-quality`（默认 0.7）、`--w-cost`（默认 0.3）。
 
 结果默认输出在脚本所在目录的 `results/`（不污染当前工作目录）：`comparison.csv/json`、
 `trace_*.csv`、两张 PNG 与 `comparison` 指标摘要。
 
 ### 典型结果（默认参数，720 步）
 
-| 控制器 | SLO 违反率 | 累计成本 | 平均副本 | 预测 RMSE@h=1 |
-|---|---|---|---|---|
-| Static | 0.56% | 高（常驻峰值副本） | 高 | — |
-| HPA | 8.06% | 中 | 中 | — |
-| NoAI-MAPE | 11.25% | 中 | 中 | 有定义 |
-| AI-MAPE | **2.92%** | 低 | 低 | 51.09 |
+| 控制器 | SLO 违反率 | 成本/千请求 | 平均副本 | 综合分 | 预测 RMSE@h=1 |
+|---|---|---|---|---|---|
+| Static | **0.56%** | 10.20 | 12.99 | **75.9** | — |
+| K8s HPA | 8.06% | 6.27 | 6.87 | 22.3 | — |
+| NoAI-MAPE | 11.25% | **4.66** | 5.42 | 30.0 | 60.03 |
+| AI-MAPE | 2.92% | 8.54 | 10.01 | 45.5 | **51.09** |
 
-结论：AI-MAPE 依靠在线集成预测提前扩容 + 自适应安全边际，在**更低成本**下把 SLO 违反率压到明显低于
-K8s 原生 HPA 的水平；Static 虽然违反率最低但资源开销最大。
+**综合分口径**（0–100，越高越好，`evaluator.py`）：
+
+```
+quality    = 100 × clip(1 − 违反率 / SLO预算, 0, 1)      # SLO预算默认 5%
+efficiency = 100 × (最低成本组成本 / 该组成本)            # 相对效率
+composite  = 0.7 × quality + 0.3 × efficiency            # 权重可用 --w-quality/--w-cost 调整
+```
+
+两个指标先归一化到 0–100 再加权，避免"违反率(%) + 系数×成本/千请求"这种跨量纲裸加和
+（成本项的绝对大小取决于 `pod_cost_per_step` 的标定值，换一个成本常数排序就会变）。
+
+读法：
+
+- **AI-MAPE** 用 2.92% 的违反率、成本仅为 Static 的 84%，综合分 45.5，在四个 MAPE/基线里最高；
+  同视界（h=1）预测 RMSE 比 NoAI-MAPE 低 14.9%。
+- **Static** 综合分最高（75.9），因为它的违反率接近 0；但它用 12.99 个常驻副本换来这个成绩，
+  单位请求成本是 NoAI 的 2.19 倍。若按 5% 的 SLO 预算做**硬约束**筛选，仅 Static 与 AI-MAPE 达标，
+  其中 AI-MAPE 成本最低（8.54 vs 10.20），是"达标前提下的成本最优解"。
+- 四组在（违反率, 成本）平面上**互不支配**，构成一条 trade-off 曲线，因此任何排名都依赖权重选择，
+  建议同时看 `--w-quality/--w-cost` 的敏感性，而不是只引用一个总分。
 
 ### 可移植性
 
