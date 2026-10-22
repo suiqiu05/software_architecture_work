@@ -240,16 +240,33 @@ class AIMapeController(BaseController):
         applied: Dict[str, Any] = {}
         if not hints:
             return applied
+
+        # 边界一律取自 AdaptivePlanner.param_spec()：hints 可能来自 LLM、人工或
+        # Web 页面，不能假定上游已经钳制过。此前这里对 margin / target_util 直接
+        # 赋值，一旦上游放行越界值就会污染控制环（且不会被 _adapt 纠正下限之外的量）。
+        spec = AdaptivePlanner.param_spec()
         planner = self.planner
         if isinstance(planner, AdaptivePlanner):
-            if "margin" in hints:
-                planner.margin = float(hints["margin"])
-                applied["margin"] = planner.margin
-            if "target_util" in hints:
-                planner.target_util = float(hints["target_util"])
-                applied["target_util"] = planner.target_util
+            for key in ("margin", "target_util"):
+                if key not in hints:
+                    continue
+                try:
+                    raw = float(hints[key])
+                except (TypeError, ValueError):
+                    continue
+                lo, hi = spec[key]["min"], spec[key]["max"]
+                v = max(lo, min(hi, raw))
+                setattr(planner, key, v)
+                applied[key] = v
+                if abs(v - raw) > 1e-9:
+                    applied[key + "_clamped_from"] = raw
         if "horizon" in hints:
-            self.horizon = max(1, min(5, int(hints["horizon"])))
+            try:
+                h = int(float(hints["horizon"]))
+            except (TypeError, ValueError):
+                h = self.horizon
+            self.horizon = int(max(spec["horizon"]["min"],
+                                   min(spec["horizon"]["max"], h)))
             applied["horizon"] = self.horizon
         return applied
 

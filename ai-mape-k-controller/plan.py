@@ -214,9 +214,28 @@ class AdaptivePlanner(BasePlanner):
 
     name = "adaptive"
 
-    def __init__(self, margin_init: float = 1.05, margin_min: float = 0.95,
-                 margin_max: float = 1.35, target_util_init: float = 0.92,
-                 target_util_min: float = 0.82, target_util_max: float = 0.97,
+    # ---- 可调参数的取值边界（单一来源）----
+    # 所有外部注入方（LLM 顾问、人工 hints、Web 页面）都必须通过 param_spec() 读取
+    # 这里的区间并据此钳制，不得在别处硬编码。否则会出现"注入成功但被 _adapt 静默
+    # 夹回"的假生效——例如 target_util 曾在钳制处写 0.70、而此处为 0.82。
+    MARGIN_INIT, MARGIN_MIN, MARGIN_MAX = 1.05, 0.95, 1.35
+    TARGET_UTIL_INIT, TARGET_UTIL_MIN, TARGET_UTIL_MAX = 0.92, 0.82, 0.97
+    HORIZON_MIN, HORIZON_MAX = 1, 5
+
+    @classmethod
+    def param_spec(cls) -> Dict[str, Dict[str, float]]:
+        """返回外部可注入参数的安全区间。键名与 apply_hints 接受的键一致。"""
+        return {
+            "margin": {"min": cls.MARGIN_MIN, "max": cls.MARGIN_MAX},
+            "target_util": {"min": cls.TARGET_UTIL_MIN, "max": cls.TARGET_UTIL_MAX},
+            "horizon": {"min": float(cls.HORIZON_MIN), "max": float(cls.HORIZON_MAX)},
+        }
+
+    def __init__(self, margin_init: float = MARGIN_INIT,
+                 margin_min: float = MARGIN_MIN, margin_max: float = MARGIN_MAX,
+                 target_util_init: float = TARGET_UTIL_INIT,
+                 target_util_min: float = TARGET_UTIL_MIN,
+                 target_util_max: float = TARGET_UTIL_MAX,
                  hold_steps: int = 4, gain: float = 1.05, decay: float = 0.985,
                  sample_every: int = 15, max_overprovision: float = 2.0):
         self.margin = margin_init

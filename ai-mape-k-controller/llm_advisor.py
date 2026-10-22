@@ -181,6 +181,9 @@ class LLMAdvisor:
     def suggest_params(self, traffic_stats: Dict[str, float], config: Dict[str, float],
                        profile: str = "composite") -> Tuple[bool, Dict[str, Any]]:
         """根据流量画像推荐 AdaptivePlanner 的初始参数。"""
+        # 提示词里的取值区间同样取自 param_spec()，避免模型按过时区间作答后
+        # 再被 _sanitize_params 夹回（既浪费 token，也让建议看起来"没生效"）。
+        spec = _param_spec()
         prompt = f"""你是自适应扩容控制专家。下面是即将回放的负载画像与被管系统参数。
 
 流量形态: {profile}
@@ -192,9 +195,9 @@ SLO p95={config.get('slo_latency_ms', 300):.0f} ms, 控制周期={config.get('st
 副本冷启动={config.get('startup_steps', 2)} 个周期, 副本上限={config.get('max_replicas', 40)}
 
 请给出 AI-MAPE 自适应规划器的初始参数，只输出 JSON，不要解释：
-{{"margin": <float 0.95~1.35, 负载侧安全系数>, \
-"target_util": <float 0.70~0.97, 单副本目标利用率>, \
-"horizon": <int 1~5, 预测视界(控制周期数)>, \
+{{"margin": <float {spec['margin']['min']}~{spec['margin']['max']}, 负载侧安全系数>, \
+"target_util": <float {spec['target_util']['min']}~{spec['target_util']['max']}, 单副本目标利用率>, \
+"horizon": <int {spec['horizon']['min']:.0f}~{spec['horizon']['max']:.0f}, 预测视界(控制周期数)>, \
 "rationale": "<不超过40字的原因>"}}"""
         ok, text = self.chat([{"role": "user", "content": prompt}], max_tokens=300)
         if not ok:
@@ -272,15 +275,35 @@ def _clamp(x: Any, lo: float, hi: float, default: float) -> float:
     return max(lo, min(hi, v))
 
 
+def _param_spec() -> Dict[str, Dict[str, float]]:
+    """取 AI-MAPE 规划器的参数边界（唯一来源），取不到时退回保守常量。
+
+    区间必须与 AdaptivePlanner 的实际边界同源：若此处写小而 planner 下限更高，
+    会出现"建议 0.75 被接受、随后被 _adapt 静默夹回 0.82"的假生效。
+    """
+    try:
+        from plan import AdaptivePlanner
+        return AdaptivePlanner.param_spec()
+    except Exception:
+        return {
+            "margin": {"min": 0.95, "max": 1.35},
+            "target_util": {"min": 0.82, "max": 0.97},
+            "horizon": {"min": 1.0, "max": 5.0},
+        }
+
+
 def _sanitize_params(parsed: Dict[str, Any]) -> Dict[str, Any]:
     """把模型建议约束到安全区间，避免异常输出破坏控制环。"""
-    margin = _clamp(parsed.get("margin"), 0.95, 1.35, 1.05)
-    target_util = _clamp(parsed.get("target_util"), 0.70, 0.97, 0.92)
+    spec = _param_spec()
+    margin = _clamp(parsed.get("margin"), spec["margin"]["min"],
+                    spec["margin"]["max"], 1.05)
+    target_util = _clamp(parsed.get("target_util"), spec["target_util"]["min"],
+                         spec["target_util"]["max"], 0.92)
     try:
         horizon = int(float(parsed.get("horizon", 3)))
     except (TypeError, ValueError):
         horizon = 3
-    horizon = max(1, min(5, horizon))
+    horizon = int(max(spec["horizon"]["min"], min(spec["horizon"]["max"], horizon)))
     return {
         "margin": margin,
         "target_util": target_util,
